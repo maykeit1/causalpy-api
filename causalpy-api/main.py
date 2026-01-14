@@ -89,7 +89,7 @@ async def run_inference(request: InferenceRequest):
                 date_col = col
             elif 'geo' in col_lower or 'market' in col_lower or 'region' in col_lower or 'location' in col_lower:
                 market_col = col
-            elif 'sale' in col_lower or 'revenue' in col_lower or 'value' in col_lower or 'y' == col_lower or 'response' in col_lower:
+            elif 'sale' in col_lower or 'revenue' in col_lower or 'value' in col_lower or 'y' == col_lower or 'response' in col_lower or 'traffic' in col_lower or 'conversion' in col_lower or 'kpi' in col_lower or 'metric' in col_lower or 'count' in col_lower or 'amount' in col_lower:
                 value_col = col
         
         if not date_col or not market_col or not value_col:
