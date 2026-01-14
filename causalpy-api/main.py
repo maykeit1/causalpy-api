@@ -115,10 +115,35 @@ async def run_inference(request: InferenceRequest):
         if len(control_markets) < 2:
             raise ValueError(f"Need at least 2 control markets. Found: {len(control_markets)}")
         
-        # Parse dates
-        df[date_col] = pd.to_datetime(df[date_col])
-        treatment_start = pd.to_datetime(request.treatment_start_date)
-        treatment_end = pd.to_datetime(request.treatment_end_date)
+        # Parse dates - handle both actual dates and period numbers
+        # Check if date column contains numeric period values
+        is_period_based = False
+        try:
+            # Try to convert first value to datetime
+            test_val = df[date_col].iloc[0]
+            if isinstance(test_val, (int, float)) or (isinstance(test_val, str) and test_val.isdigit()):
+                # Numeric values - treat as period numbers
+                is_period_based = True
+                df[date_col] = pd.to_numeric(df[date_col])
+                treatment_start = int(request.treatment_start_date)
+                treatment_end = int(request.treatment_end_date)
+            else:
+                # Try parsing as datetime
+                df[date_col] = pd.to_datetime(df[date_col])
+                treatment_start = pd.to_datetime(request.treatment_start_date)
+                treatment_end = pd.to_datetime(request.treatment_end_date)
+        except:
+            # Fallback: try datetime parsing
+            try:
+                df[date_col] = pd.to_datetime(df[date_col])
+                treatment_start = pd.to_datetime(request.treatment_start_date)
+                treatment_end = pd.to_datetime(request.treatment_end_date)
+            except:
+                # Last resort: treat as period numbers
+                is_period_based = True
+                df[date_col] = pd.to_numeric(df[date_col], errors='coerce')
+                treatment_start = int(request.treatment_start_date)
+                treatment_end = int(request.treatment_end_date)
         
         # Pivot data to wide format
         pivot_df = df.pivot_table(
@@ -282,7 +307,10 @@ async def run_inference(request: InferenceRequest):
         weights_dict = {control_cols[i]: float(optimal_weights[i]) for i in range(len(control_cols))}
         
         # Format dates as strings
-        date_strings = [d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d) for d in dates]
+        if is_period_based:
+            date_strings = [str(int(d)) if not pd.isna(d) else str(d) for d in dates]
+        else:
+            date_strings = [d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d) for d in dates]
         
         return InferenceResponse(
             att=round(att, 2),
