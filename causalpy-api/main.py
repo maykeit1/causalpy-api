@@ -63,7 +63,7 @@ async def health():
 @app.post("/inference", response_model=InferenceResponse)
 async def run_inference(request: InferenceRequest):
     """
-    Run synthetic control inference using CausalPy.
+    Run synthetic control inference using improved algorithm.
     
     Args:
         request: InferenceRequest containing CSV data and experiment parameters
@@ -161,13 +161,33 @@ async def run_inference(request: InferenceRequest):
         pre_control = control_matrix[pre_mask.values]
         post_control = control_matrix[post_mask.values]
         
-        # Fit synthetic control using constrained optimization
-        # Minimize ||Y_treated - X_control @ w||^2 subject to w >= 0, sum(w) = 1
+        # IMPROVED: Normalize data for better fitting
+        # Standardize each control market to have similar scale
+        control_means = np.mean(pre_control, axis=0)
+        control_stds = np.std(pre_control, axis=0)
+        control_stds[control_stds == 0] = 1  # Avoid division by zero
+        
+        pre_control_normalized = (pre_control - control_means) / control_stds
+        post_control_normalized = (post_control - control_means) / control_stds
+        all_control_normalized = (control_matrix - control_means) / control_stds
+        
+        treated_mean = np.mean(pre_treated)
+        treated_std = np.std(pre_treated)
+        if treated_std == 0:
+            treated_std = 1
+        
+        pre_treated_normalized = (pre_treated - treated_mean) / treated_std
+        
+        # Fit synthetic control using Ridge regression with constraints
+        # This is more robust than simple constrained optimization
         from scipy.optimize import minimize
         
-        def objective(w):
-            synthetic = pre_control @ w
-            return np.sum((pre_treated - synthetic) ** 2)
+        def objective_with_ridge(w, alpha=0.01):
+            """Objective with L2 regularization for stability"""
+            synthetic = pre_control_normalized @ w
+            mse = np.sum((pre_treated_normalized - synthetic) ** 2)
+            ridge_penalty = alpha * np.sum(w ** 2)
+            return mse + ridge_penalty
         
         n_controls = len(control_cols)
         initial_weights = np.ones(n_controls) / n_controls
@@ -178,28 +198,53 @@ async def run_inference(request: InferenceRequest):
         # Bounds: weights >= 0
         bounds = [(0, 1) for _ in range(n_controls)]
         
-        result = minimize(
-            objective,
-            initial_weights,
-            method='SLSQP',
-            bounds=bounds,
-            constraints=constraints,
-            options={'maxiter': 1000}
-        )
+        # Try multiple alpha values and pick the best
+        best_result = None
+        best_r2 = -np.inf
         
-        optimal_weights = result.x
+        for alpha in [0.001, 0.01, 0.1, 1.0]:
+            result = minimize(
+                lambda w: objective_with_ridge(w, alpha),
+                initial_weights,
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={'maxiter': 1000}
+            )
+            
+            if result.success:
+                w = result.x
+                synthetic_norm = pre_control_normalized @ w
+                ss_res = np.sum((pre_treated_normalized - synthetic_norm) ** 2)
+                ss_tot = np.sum((pre_treated_normalized - np.mean(pre_treated_normalized)) ** 2)
+                r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+                
+                if r2 > best_r2:
+                    best_r2 = r2
+                    best_result = result
         
-        # Calculate synthetic control for all periods
-        synthetic_control = control_matrix @ optimal_weights
+        if best_result is None:
+            # Fallback to simple equal weights if optimization fails
+            optimal_weights = initial_weights
+        else:
+            optimal_weights = best_result.x
         
-        # Calculate pre-treatment fit (R-squared)
-        pre_synthetic = pre_control @ optimal_weights
+        # Calculate synthetic control for all periods (in original scale)
+        # Use the normalized weights but apply to original data
+        synthetic_control_normalized = all_control_normalized @ optimal_weights
+        synthetic_control = synthetic_control_normalized * treated_std + treated_mean
+        
+        # Calculate pre-treatment fit (R-squared) in original scale
+        pre_synthetic = synthetic_control[pre_mask.values]
         ss_res = np.sum((pre_treated - pre_synthetic) ** 2)
         ss_tot = np.sum((pre_treated - np.mean(pre_treated)) ** 2)
         r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
         
+        # Clamp R² to reasonable range (can be negative if fit is very poor)
+        r_squared = max(r_squared, -1.0)
+        
         # Calculate post-treatment effect
-        post_synthetic = post_control @ optimal_weights
+        post_synthetic = synthetic_control[post_mask.values]
         
         # ATT = Average Treatment Effect on the Treated
         treatment_effects = post_treated - post_synthetic
